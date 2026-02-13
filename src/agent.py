@@ -1,8 +1,12 @@
 """Main agent runner (brain)"""
+import logging
+from pathlib import Path
 from .scanner import Scanner
 from .analyzer import Analyzer
 from .fixer import Fixer
 from .utils import backup_file, write_file, validate_fix
+
+logger = logging.getLogger(__name__)
 
 class AutoFixAgent:
     def __init__(self, force_rescan=True):
@@ -10,17 +14,33 @@ class AutoFixAgent:
         self.analyzer = Analyzer(force_rescan=force_rescan)
         self.fixer = Fixer()
         self.force_rescan = force_rescan
-        self._scan_cache = {}  # Clear cache on each instance
     
     def run(self, target_path, auto_fix=False):
-        """Main execution logic - scan only by default, fix only if auto_fix=True"""
-        # Clear all caches when force_rescan is enabled
-        if self.force_rescan:
-            self._scan_cache.clear()
-            self.analyzer.clear_cache()
+        """Main execution logic - scan first, then auto-fix if enabled"""
+        logger.info(f"Starting agent run on {target_path}, auto_fix={auto_fix}")
         
-        # Fresh scan
+        # Step 1: Scan for issues
+        scan_results = self._scan_files(target_path)
+        
+        # Step 2: Auto-fix if enabled
+        if auto_fix and scan_results["files_with_issues"] > 0:
+            logger.info("Starting auto-fix...")
+            fix_results = self._fix_files(target_path, scan_results)
+            scan_results.update(fix_results)
+        
+        return scan_results
+    
+    def _scan_files(self, target_path):
+        """Scan files for issues only"""
+        logger.info("Scanning files...")
         files = self.scanner.scan(target_path)
+        logger.info(f"Found {len(files)} files to analyze")
+        
+        MAX_FILES = 100
+        if len(files) > MAX_FILES:
+            logger.warning(f"Too many files ({len(files)}), limiting to {MAX_FILES}")
+            files = files[:MAX_FILES]
+        
         results = {
             "scanned_files": len(files),
             "files_with_issues": 0,
@@ -30,32 +50,56 @@ class AutoFixAgent:
             "fixes_applied": []
         }
         
-        for file_path in files:
+        for idx, file_path in enumerate(files, 1):
+            logger.info(f"Scanning {idx}/{len(files)}: {file_path.name}")
+            
+            if 'migration' in str(file_path).lower() or 'alembic' in str(file_path).lower():
+                continue
+            
             try:
-                # Read with minimal buffering for fresh content
-                with open(file_path, 'r', encoding='utf-8', buffering=1) as f:
-                    original_content = f.read()
+                file_size = file_path.stat().st_size
+                if file_size > 500_000:
+                    logger.warning(f"Skipping large file: {file_path.name}")
+                    continue
+                
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
             except Exception as e:
-                results["issues_found"].append({"file": str(file_path), "error": str(e)})
+                logger.warning(f"Error reading {file_path}: {e}")
                 continue
             
             issues = self.analyzer.analyze(file_path)
-            if not issues:
-                continue
-            
-            results["files_with_issues"] += 1
-            results["issues_found"].extend([{"file": str(file_path), "issue": issue} for issue in issues])
-            
-            # Only fix if auto_fix is enabled
-            if auto_fix:
-                fixed_content = self.fixer.fix(file_path, original_content, issues)
-                
-                # Check if content actually changed
-                if fixed_content != original_content:
-                    if validate_fix(original_content, fixed_content):
-                        backup_file(file_path)
-                        write_file(file_path, fixed_content)
-                        results["files_fixed"] += 1
-                        results["fixes_applied"].append({"file": str(file_path), "status": "fixed", "issues": len(issues)})
+            if issues:
+                logger.info(f"Found {len(issues)} issues in {file_path.name}")
+                results["files_with_issues"] += 1
+                results["issues_found"].extend([{"file": str(file_path), "issue": issue} for issue in issues])
         
+        logger.info(f"Scan complete: {results['files_with_issues']} files with issues")
         return results
+    
+    def _fix_files(self, target_path, scan_results):
+        """Apply fixes to files with issues"""
+        files_to_fix = list(set([item["file"] for item in scan_results["issues_found"]]))
+        fix_results = {"files_fixed": 0, "fixes_applied": []}
+        
+        for file_str in files_to_fix:
+            file_path = Path(file_str)
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    original_content = f.read()
+                
+                file_issues = [item["issue"] for item in scan_results["issues_found"] if item["file"] == file_str]
+                fixed_content = self.fixer.fix(file_path, original_content, file_issues)
+                
+                if fixed_content != original_content and validate_fix(original_content, fixed_content):
+                    backup_file(file_path)
+                    write_file(file_path, fixed_content)
+                    fix_results["files_fixed"] += 1
+                    fix_results["fixes_applied"].append({"file": file_str, "status": "fixed", "issues": len(file_issues)})
+                    logger.info(f"Fixed {file_path.name}")
+            except Exception as e:
+                logger.error(f"Error fixing {file_path.name}: {e}")
+        
+        logger.info(f"Auto-fix complete: {fix_results['files_fixed']} files fixed")
+        return fix_results

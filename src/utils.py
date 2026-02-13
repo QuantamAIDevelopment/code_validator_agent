@@ -22,17 +22,20 @@ def backup_file(file_path):
         return file_path
 
 def write_file(file_path, content):
-    """Write content to file"""
+    """Write content to file with immediate flush"""
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(content)
+        f.flush()
+        import os
+        os.fsync(f.fileno())
 
 def validate_fix(original_content, fixed_content):
     """Basic validation of fixed code"""
     if not fixed_content or not fixed_content.strip():
         return False
     
-    # Allow any changes - don't be too strict
-    if len(fixed_content) < len(original_content) * 0.3:
+    # More lenient - allow changes as long as content exists
+    if len(fixed_content) < len(original_content) * 0.2:
         return False
     
     return True

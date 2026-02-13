@@ -78,7 +78,14 @@ class Fixer:
                     line = line.replace(match.group(0), f'isinstance({match.group(1)}, {match.group(2)})')
             
             elif issue_type == 'ImportIssue':
-                line = ' ' * indent + '# ' + stripped + '  # TODO: Replace wildcard import'
+                if 'import *' in line:
+                    # Try to replace with specific imports (common cases)
+                    if 'from flask import *' in line:
+                        line = ' ' * indent + 'from flask import Flask, request, jsonify, render_template'
+                    elif 'from django' in line:
+                        line = ' ' * indent + '# ' + stripped + '  # TODO: Import specific items'
+                    else:
+                        line = ' ' * indent + '# ' + stripped + '  # TODO: Replace wildcard import'
             
             elif issue_type == 'SecurityIssue':
                 if 'eval(' in line:
@@ -91,12 +98,22 @@ class Fixer:
                     line = line.replace('shell=True', 'shell=False')
                 elif 'pickle.load' in line:
                     line = ' ' * indent + '# ' + stripped + '  # SECURITY: Use json'
+                elif 'verify=False' in line:
+                    line = line.replace('verify=False', 'verify=True')
+                elif 'SQL injection' in issue.get('message', ''):
+                    line = ' ' * indent + '# ' + stripped + '  # SECURITY: Use parameterized queries'
+                elif 'password' in line.lower() and 'log' in line.lower():
+                    line = ' ' * indent + '# ' + stripped + '  # SECURITY: Remove password logging'
+                elif 'api_key' in line.lower():
+                    line = ' ' * indent + '# ' + stripped + '  # SECURITY: Move to environment variable'
             
             elif issue_type == 'CodeQuality':
                 if 'console.log(' in line:
                     line = ' ' * indent + '// ' + stripped
                 elif '!important' in line:
                     line = line.replace('!important', '')
+                elif 'TODO' in line or 'FIXME' in line:
+                    pass  # Keep TODO comments as-is
             
             elif issue_type == 'DeprecatedCode':
                 if 'var ' in line:
@@ -112,19 +129,60 @@ class Fixer:
                 line = line.rstrip()
             
             elif issue_type == 'AssignmentInCondition':
-                match = re.search(r'if\s+(\w+)\s*=\s*([^=])', line)
-                if match:
-                    line = line.replace(f'{match.group(1)} =', f'{match.group(1)} ==', 1)
+                if ':=' not in line:
+                    match = re.search(r'(if\s+\w+)\s*=\s*([^=])', line)
+                    if match:
+                        line = line.replace(f'{match.group(1)} =', f'{match.group(1)} ==', 1)
             
             elif issue_type == 'EmptyFunction':
                 if 'pass' in line:
                     line = ' ' * indent + 'raise NotImplementedError()'
             
             elif issue_type == 'PerformanceIssue':
-                line = ' ' * indent + '# ' + stripped + '  # TODO: Use join()'
+                if 'sleep(' in line:
+                    line = ' ' * indent + '# ' + stripped + '  # TODO: Use async/await'
+                else:
+                    line = ' ' * indent + '# ' + stripped + '  # TODO: Use join()'
             
             elif issue_type == 'DuplicateException':
                 line = ' ' * indent + '# ' + stripped + '  # Duplicate'
+            
+            elif issue_type == 'ResourceLeak':
+                if 'open(' in line and 'with' not in line:
+                    # Convert to with statement
+                    match = re.search(r'(\w+)\s*=\s*open\(([^)]+)\)', line)
+                    if match:
+                        var_name = match.group(1)
+                        file_args = match.group(2)
+                        line = ' ' * indent + f'with open({file_args}) as {var_name}:'
+                elif 'connect(' in line or 'Connection(' in line:
+                    line = ' ' * indent + '# ' + stripped + '  # TODO: Use context manager or close()'
+            
+            elif issue_type == 'DatabaseIssue':
+                if 'execute' in line:
+                    # Add commit on next line
+                    lines.insert(line_num, ' ' * indent + 'conn.commit()  # Auto-added')
+                    modified = True
+            
+            elif issue_type == 'APIIssue':
+                if 'methods=' not in line and '@app.route' in line:
+                    # Add methods parameter to route
+                    if '(' in line and ')' in line:
+                        line = line.replace(')', ', methods=["GET", "POST"])')
+                elif 'return ' in stripped and 'jsonify' not in line and 'dict' in issue.get('message', ''):
+                    # Wrap return dict with jsonify
+                    match = re.search(r'return\s+({[^}]+})', line)
+                    if match:
+                        line = line.replace(match.group(0), f'return jsonify({match.group(1)})')
+                        # Add import if not present
+                        if 'from flask import' not in content:
+                            lines.insert(0, 'from flask import jsonify')
+            
+            elif issue_type == 'ErrorHandling':
+                if 'raise Exception(' in line:
+                    line = line.replace('raise Exception(', 'raise ValueError(')
+                elif 'pass' in line:
+                    line = ' ' * indent + 'logger.error("Error occurred")  # TODO: Handle error properly'
             
             if line != original_line:
                 lines[line_num - 1] = line

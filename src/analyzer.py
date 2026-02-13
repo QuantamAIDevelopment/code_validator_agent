@@ -7,37 +7,15 @@ from pathlib import Path
 class Analyzer:
     def __init__(self, force_rescan=True):
         self.force_rescan = force_rescan
-        self._file_cache = {}  # Track file mtimes
-    
-    def clear_cache(self):
-        """Clear file modification time cache"""
-        self._file_cache.clear()
     
     def analyze(self, file_path):
         """Detect bugs and issues"""
         issues = []
         
         try:
-            # Always read fresh content when force_rescan is True
-            if self.force_rescan:
-                # Clear cache entry for this file to force fresh read
-                self._file_cache.pop(str(file_path), None)
-                
-            # Check modification time for cache invalidation
-            current_mtime = os.path.getmtime(file_path)
-            cached_mtime = self._file_cache.get(str(file_path))
-            
-            # Force re-analysis if file was modified or force_rescan is True
-            if self.force_rescan or cached_mtime is None or cached_mtime != current_mtime:
-                self._file_cache[str(file_path)] = current_mtime
-                
-                # Read with minimal buffering for fresh content
-                with open(file_path, 'r', encoding='utf-8', errors='ignore', buffering=1) as f:
-                    content = f.read()
-            else:
-                # Use cached result (for production optimization)
-                return []
-                
+            # Always read fresh content
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
         except Exception as e:
             return [{'type': 'FileError', 'message': str(e), 'line': 0}]
         
@@ -64,6 +42,13 @@ class Analyzer:
         # Syntax check
         try:
             tree = ast.parse(content)
+        except IndentationError as e:
+            issues.append({
+                'type': 'IndentationError',
+                'message': f'Indentation error: {e.msg}',
+                'line': e.lineno or 0
+            })
+            return issues
         except SyntaxError as e:
             issues.append({
                 'type': 'SyntaxError',
@@ -79,6 +64,10 @@ class Analyzer:
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
             
+            # Skip commented lines and TODO comments
+            if stripped.startswith('#'):
+                continue
+            
             # Security issues
             if 'eval(' in line:
                 issues.append({'type': 'SecurityIssue', 'message': 'Avoid using eval() - security risk', 'line': i})
@@ -92,11 +81,61 @@ class Analyzer:
             if 'shell=True' in line:
                 issues.append({'type': 'SecurityIssue', 'message': 'shell=True is a security risk - avoid if possible', 'line': i})
             
+            # Backend-specific issues
+            if 'password' in line.lower() and ('print(' in line or 'log' in line.lower()):
+                issues.append({'type': 'SecurityIssue', 'message': 'Potential password logging detected', 'line': i})
+            
+            if 'api_key' in line.lower() and ('=' in line and '"' in line):
+                issues.append({'type': 'SecurityIssue', 'message': 'Hardcoded API key detected', 'line': i})
+            
+            if 'TODO' in line or 'FIXME' in line or 'HACK' in line:
+                issues.append({'type': 'CodeQuality', 'message': 'TODO/FIXME comment found - needs implementation', 'line': i})
+            
+            if '.execute(' in line and 'f"' in line:
+                issues.append({'type': 'SecurityIssue', 'message': 'SQL injection risk - use parameterized queries', 'line': i})
+            
+            if '.execute(' in line and '%' in line and 'format' not in line:
+                issues.append({'type': 'SecurityIssue', 'message': 'SQL injection risk - use parameterized queries', 'line': i})
+            
+            if 'requests.get(' in line and 'verify=False' in line:
+                issues.append({'type': 'SecurityIssue', 'message': 'SSL verification disabled - security risk', 'line': i})
+            
+            if 'sleep(' in line and not stripped.startswith('#'):
+                issues.append({'type': 'PerformanceIssue', 'message': 'sleep() call may block - consider async approach', 'line': i})
+            
+            # Database issues
+            if 'cursor.execute' in line and 'commit' not in content[max(0, content.find(line)):min(len(content), content.find(line)+500)]:
+                issues.append({'type': 'DatabaseIssue', 'message': 'Missing commit() after execute() - transaction may not persist', 'line': i})
+            
+            if '.close()' not in content and ('connect(' in line or 'Connection(' in line):
+                issues.append({'type': 'ResourceLeak', 'message': 'Database connection not closed - use context manager', 'line': i})
+            
+            if 'open(' in line and '.close()' not in content[max(0, content.find(line)):min(len(content), content.find(line)+300)]:
+                issues.append({'type': 'ResourceLeak', 'message': 'File not closed - use "with" statement', 'line': i})
+            
+            # API issues
+            if '@app.route' in line or '@router' in line:
+                if 'methods=' not in line and 'get' not in line.lower() and 'post' not in line.lower():
+                    issues.append({'type': 'APIIssue', 'message': 'HTTP method not specified for route', 'line': i})
+            
+            if 'return ' in stripped and 'jsonify' not in line and '@app' in content[:content.find(line)]:
+                if 'dict' in line or '{' in line:
+                    issues.append({'type': 'APIIssue', 'message': 'Return dict without jsonify() in Flask route', 'line': i})
+            
+            # Error handling
+            if 'try:' in stripped:
+                try_block = content[content.find(line):]
+                if 'except Exception:' in try_block[:500] and 'pass' in try_block[:500]:
+                    issues.append({'type': 'ErrorHandling', 'message': 'Empty exception handler - errors silently ignored', 'line': i})
+            
+            if 'raise Exception(' in line:
+                issues.append({'type': 'ErrorHandling', 'message': 'Generic Exception raised - use specific exception type', 'line': i})
+            
             # Code quality issues
-            if '== None' in line and 'is None' not in line:
+            if '== None' in line and 'is None' not in line and '# ' not in stripped:
                 issues.append({'type': 'ComparisonBug', 'message': "Use 'is None' instead of '== None'", 'line': i})
             
-            if '!= None' in line and 'is not None' not in line:
+            if '!= None' in line and 'is not None' not in line and '# ' not in stripped:
                 issues.append({'type': 'ComparisonBug', 'message': "Use 'is not None' instead of '!= None'", 'line': i})
             
             if stripped == 'except:':
@@ -112,7 +151,7 @@ class Analyzer:
                 issues.append({'type': 'TypeCheckBug', 'message': 'Use isinstance() instead of type() ==', 'line': i})
             
             # Common bugs
-            if re.search(r'\bif\s+\w+\s*=\s*', line):
+            if re.search(r'\bif\s+\w+\s*=\s*[^=]', line) and ':=' not in line:
                 issues.append({'type': 'AssignmentInCondition', 'message': 'Assignment in condition - did you mean == ?', 'line': i})
             
             if 'import *' in line:
@@ -178,6 +217,10 @@ class Analyzer:
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
             
+            # Skip commented lines
+            if stripped.startswith('//'):
+                continue
+            
             # Security issues
             if 'eval(' in line:
                 issues.append({'type': 'SecurityIssue', 'message': 'Avoid eval() - security risk', 'line': i})
@@ -210,6 +253,12 @@ class Analyzer:
         lines = content.split('\n')
         
         for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            
+            # Skip commented lines
+            if stripped.startswith('<!--'):
+                continue
+            
             # Missing alt attributes
             if '<img' in line and 'alt=' not in line:
                 issues.append({'type': 'Accessibility', 'message': 'Image missing alt attribute', 'line': i})

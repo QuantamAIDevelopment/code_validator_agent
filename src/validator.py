@@ -25,4 +25,3 @@ class Validator:
                 return False, "Critical errors found"
         except Exception:
             return True, "Validation skipped"
-        return True, "Validation complete"
