@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from scanner import Scanner
 from analyzer import Analyzer
 from organizer import CodeOrganizer
-from refactor_agent import RefactorAgent
+from refactor_agent import RefactoringAgent
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ class CodeOrganizationOrchestrator:
         self.scanner = Scanner()
         self.analyzer = Analyzer(force_rescan=True)
         self.organizer = CodeOrganizer()
-        self.refactor_agent = RefactorAgent()
+        self.refactor_agent = RefactoringAgent()
     
     def orchestrate(self, source_path: str, target_path: str = None) -> Dict:
         """

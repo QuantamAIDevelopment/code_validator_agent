@@ -13,13 +13,11 @@ class Analyzer:
         issues = []
         
         try:
-            # Always read fresh content
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
         except Exception as e:
             return [{'type': 'FileError', 'message': str(e), 'line': 0}]
         
-        # Analyze based on file type
         try:
             if file_path.suffix == '.py':
                 issues.extend(self._analyze_python(file_path, content))
@@ -29,8 +27,38 @@ class Analyzer:
                 issues.extend(self._analyze_html(file_path, content))
             elif file_path.suffix in ['.css', '.scss', '.sass']:
                 issues.extend(self._analyze_css(file_path, content))
+            
+            # Add quality checks
+            issues.extend(self._check_quality_issues(file_path, content))
         except Exception as e:
             issues.append({'type': 'AnalysisError', 'message': f'Failed to analyze: {str(e)}', 'line': 0})
+        
+        return issues
+    
+    def _check_quality_issues(self, file_path, content):
+        """Check quality issues"""
+        issues = []
+        lines = content.split('\n')
+        
+        # Missing logging
+        if len(lines) > 50 and 'logging' not in content and 'logger' not in content:
+            issues.append({'type': 'MissingLogging', 'message': 'No logging found', 'line': 1})
+        
+        # Missing error handling
+        if len(lines) > 30 and 'try:' not in content:
+            issues.append({'type': 'MissingErrorHandling', 'message': 'No error handling', 'line': 1})
+        
+        # Long functions
+        if file_path.suffix == '.py':
+            try:
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef):
+                        func_lines = node.end_lineno - node.lineno
+                        if func_lines > 50:
+                            issues.append({'type': 'LongFunction', 'message': f'Function {node.name} is {func_lines} lines', 'line': node.lineno})
+            except:
+                pass
         
         return issues
     

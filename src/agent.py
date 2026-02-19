@@ -4,6 +4,7 @@ from pathlib import Path
 from .scanner import Scanner
 from .analyzer import Analyzer
 from .fixer import Fixer
+from .refactor_agent import RefactoringAgent
 from .utils import backup_file, write_file, validate_fix
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ class AutoFixAgent:
         self.scanner = Scanner()
         self.analyzer = Analyzer(force_rescan=force_rescan)
         self.fixer = Fixer()
+        self.refactorer = RefactoringAgent()
         self.force_rescan = force_rescan
     
     def run(self, target_path, auto_fix=False):
@@ -90,10 +92,16 @@ class AutoFixAgent:
                     original_content = f.read()
                 
                 file_issues = [item["issue"] for item in scan_results["issues_found"] if item["file"] == file_str]
+                
+                # Apply pattern-based fixes
                 fixed_content = self.fixer.fix(file_path, original_content, file_issues)
                 
+                # Apply refactoring for quality issues
+                quality_issues = [i for i in file_issues if i['type'] in ['MissingLogging', 'MissingErrorHandling', 'LongFunction']]
+                if quality_issues:
+                    fixed_content = self.refactorer.refactor_file(file_path, fixed_content)
+                
                 if fixed_content != original_content and validate_fix(original_content, fixed_content):
-                    backup_file(file_path)
                     write_file(file_path, fixed_content)
                     fix_results["files_fixed"] += 1
                     fix_results["fixes_applied"].append({"file": file_str, "status": "fixed", "issues": len(file_issues)})

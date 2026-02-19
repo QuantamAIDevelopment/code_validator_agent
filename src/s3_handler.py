@@ -29,12 +29,20 @@ class S3Handler:
             raise
     
     def upload_zip(self, local_path: str, s3_key: str) -> str:
-        """Upload ZIP to S3 and return public URL"""
+        """Upload ZIP to S3 and return pre-signed URL"""
         try:
             logger.info(f"Uploading {local_path} to S3...")
+            
+            # Upload file
             self.s3_client.upload_file(local_path, self.bucket_name, s3_key)
-            url = f"https://{self.bucket_name}.s3.{os.getenv('AWS_REGION', 'ap-south-1')}.amazonaws.com/{s3_key}"
-            logger.info(f"Uploaded: {url}")
+            
+            # Generate pre-signed URL (valid for 7 days)
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': self.bucket_name, 'Key': s3_key},
+                ExpiresIn=604800  # 7 days
+            )
+            logger.info(f"Uploaded with pre-signed URL")
             return url
         except Exception as e:
             logger.error(f"S3 upload failed: {e}")

@@ -27,17 +27,50 @@ class Fixer:
             self.openai_client = OpenAI(api_key=self.openai_key)
     
     def fix(self, file_path, content, issues):
-        """Fix detected issues using pattern-based fixes only (fast)"""
+        """Fix detected issues using pattern-based fixes and AI for complex issues"""
         if not issues:
             return content
         
-        # Apply pattern fixes only - no AI to avoid delays
-        return self._pattern_based_fix(content, issues)
+        # Separate simple and complex issues
+        simple_issues = [i for i in issues if i['type'] not in ['LongFunction', 'MissingLogging', 'MissingErrorHandling']]
+        complex_issues = [i for i in issues if i['type'] in ['LongFunction', 'MissingLogging', 'MissingErrorHandling']]
+        
+        # Apply pattern fixes for simple issues
+        fixed_content = self._pattern_based_fix(content, simple_issues)
+        
+        # Apply AI fixes for complex issues if available
+        if complex_issues and (self.groq_client or self.openai_client):
+            fixed_content = self._ai_refactor(file_path, fixed_content, complex_issues)
+        else:
+            # Fallback: Add basic improvements
+            if str(file_path).endswith('.py'):
+                fixed_content = self._add_quality_improvements(fixed_content, file_path)
+        
+        return fixed_content
+    
+    def _ai_refactor(self, file_path, content, issues):
+        """Use AI to refactor complex issues"""
+        try:
+            # Use Groq (faster) or OpenAI
+            if self.groq_client:
+                return self._ai_fix_with_client(content, issues, self.groq_client, 'llama-3.3-70b-versatile')
+            elif self.openai_client:
+                return self._ai_fix_with_client(content, issues, self.openai_client, 'gpt-4o-mini')
+        except Exception as e:
+            logging.warning(f"AI refactoring failed: {e}")
+            return content
+        return content
     
     def _pattern_based_fix(self, content, issues):
         """Apply pattern-based fixes for ALL issue types"""
         lines = content.split('\n')
         modified = False
+        
+        # Add missing imports at top if needed
+        needs_logging = any('logging' in i.get('message', '').lower() for i in issues)
+        if needs_logging and 'import logging' not in content:
+            lines.insert(0, 'import logging\n')
+            modified = True
         
         for issue in issues:
             line_num = issue.get('line', 0)
@@ -184,34 +217,126 @@ class Fixer:
                 elif 'pass' in line:
                     line = ' ' * indent + 'logger.error("Error occurred")  # TODO: Handle error properly'
             
+            elif issue_type == 'MissingLogging':
+                # Add logger at start of file
+                if 'import logging' not in '\n'.join(lines[:20]):
+                    lines.insert(0, 'import logging\n')
+                    lines.insert(1, 'logger = logging.getLogger(__name__)\n')
+                    modified = True
+            
+            elif issue_type == 'MissingErrorHandling':
+                # Add try-except wrapper hint
+                lines.insert(line_num, ' ' * indent + '# TODO: Add try-except error handling')
+                modified = True
+            
+            elif issue_type == 'LongFunction':
+                # Add refactoring hint
+                lines.insert(line_num, ' ' * indent + '# TODO: Refactor - function too long, split into smaller functions')
+                modified = True
+            
             if line != original_line:
                 lines[line_num - 1] = line
                 modified = True
         
         return '\n'.join(lines)
     
+    def _add_quality_improvements(self, content, file_path):
+        """Add quality improvements: logging, comments, error handling"""
+        lines = content.split('\n')
+        
+        # 1. Add logging import if not present
+        has_logging = 'import logging' in content or 'from logging import' in content
+        if not has_logging and len(lines) > 10:
+            import_idx = 0
+            for i, line in enumerate(lines):
+                if line.startswith('import ') or line.startswith('from '):
+                    import_idx = i + 1
+                    break
+            lines.insert(import_idx, 'import logging')
+            lines.insert(import_idx + 1, '')
+        
+        # 2. Add file-level docstring if missing
+        if len(lines) > 3 and not lines[0].strip().startswith('"""'):
+            lines.insert(0, f'"""Module: {file_path.name} - Auto-generated documentation"""')
+            lines.insert(1, '')
+        
+        # 3. Add function docstrings and inline comments
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            # Add docstring to functions
+            if stripped.startswith('def ') and ':' in line:
+                if i + 1 < len(lines) and not lines[i + 1].strip().startswith('"""'):
+                    indent = len(line) - len(line.lstrip()) + 4
+                    func_name = stripped.split('(')[0].replace('def ', '')
+                    lines.insert(i + 1, ' ' * indent + f'"""Function: {func_name}"""')
+                    i += 1
+            
+            # Add docstring to classes
+            elif stripped.startswith('class ') and ':' in line:
+                if i + 1 < len(lines) and not lines[i + 1].strip().startswith('"""'):
+                    indent = len(line) - len(line.lstrip()) + 4
+                    class_name = stripped.split('(')[0].split(':')[0].replace('class ', '')
+                    lines.insert(i + 1, ' ' * indent + f'"""Class: {class_name}"""')
+                    i += 1
+            
+            # Add inline comments for complex logic
+            elif ('if ' in stripped or 'for ' in stripped or 'while ' in stripped) and not '#' in line:
+                if len(stripped) > 30:  # Only for longer lines
+                    lines[i] = line + '  # Logic check'
+            
+            i += 1
+        
+        # 4. Wrap main execution in try-except if not present
+        has_try = 'try:' in content
+        if not has_try and 'if __name__' in content:
+            for i, line in enumerate(lines):
+                if 'if __name__' in line:
+                    # Find the block and wrap it
+                    indent = len(line) - len(line.lstrip())
+                    lines.insert(i + 1, ' ' * (indent + 4) + 'try:')
+                    # Find end of block
+                    j = i + 2
+                    while j < len(lines) and (not lines[j].strip() or lines[j].startswith(' ' * (indent + 4))):
+                        j += 1
+                    lines.insert(j, ' ' * (indent + 4) + 'except Exception as e:')
+                    lines.insert(j + 1, ' ' * (indent + 8) + 'logging.error(f"Error: {e}")')
+                    break
+        
+        return '\n'.join(lines)
+    
     def _ai_fix_with_client(self, content, issues, client, model):
         """Fix using AI with specified client and model"""
-        issues_text = "\n".join([f"- {issue['type']}: {issue['message']} (line {issue['line']})" for issue in issues[:20]])  # Limit to 20 issues
+        issues_text = "\n".join([f"- {issue['type']}: {issue['message']} (line {issue.get('line', 0)})" for issue in issues[:10]])
         
-        prompt = f"""Fix these code issues:
+        prompt = f"""Refactor this Python code to fix these issues:
 
 {issues_text}
 
-Code:
-```
-{content[:2000]}```
+Rules:
+1. Split long functions (>50 lines) into smaller helper functions
+2. Add logging statements (import logging, use logger)
+3. Add try-except error handling
+4. Keep all functionality identical
+5. Return ONLY the refactored code, no explanations
 
-Return ONLY the fixed code, no explanations."""
+Code:
+```python
+{content[:4000]}
+```
+
+Refactored code:"""
         
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Fix code issues. Return only fixed code."},
+                {"role": "system", "content": "You are a senior software architect. Refactor code to improve quality while preserving functionality."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,
-            max_tokens=2000
+            temperature=0.2,
+            max_tokens=4000
         )
         
         fixed_code = response.choices[0].message.content
